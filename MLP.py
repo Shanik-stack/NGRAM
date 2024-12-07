@@ -2,12 +2,12 @@ import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
 
-BATCH_SIZE = 64
+BATCH_SIZE = 32
 CONTEXT_LENGTH = 3
-EMBEDDING_SIZE = 10
+EMBEDDING_SIZE = 15
 # VOCAB_SIZE = len(chars)
 VOCAB_SIZE = 28
-EPOCHS = 4000
+EPOCHS = 10000
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -22,41 +22,24 @@ class n_gram_mlp(nn.Module):
         self.batch_size = batch_size
         self.embedding_size = embedding_size
         self.vocab_size = vocab_size    
-        self.char_embedding = nn.Parameter(torch.randn((vocab_size, embedding_size), device=device))
+        self.char_embedding = nn.Parameter(torch.randn((vocab_size,embedding_size), device = device))
 
-        self.layer1 = nn.Linear(self.context_length * self.embedding_size, 128)
-        self.layer_2 = nn.Linear(128, 64)
-        self.out_layer = nn.Linear(64, self.vocab_size)
-        self.relu = nn.LeakyReLU(0.1)  # Tanh activation
-        self.bn1 = nn.BatchNorm1d(128)
-        self.bn2 = nn.BatchNorm1d(64)
-        
-        self.activations = []  # List to store activations
-        self.layer_names = []  # List to store layer names
-
-    def forward(self, x: torch.tensor) -> torch.tensor:
-        out = torch.matmul(x, self.char_embedding).view(x.shape[0], -1)
-        # Store activation for layer1
+        self.layer1 = nn.Linear(self.context_length*self.embedding_size, 256)
+        self.layer2 = nn.Linear(256,128)
+        self.out_layer = nn.Linear(128, self.vocab_size)
+        self.relu = nn.Tanh()
+        self.bn1 = nn.BatchNorm1d(256)
+        self.bn2 = nn.BatchNorm1d(128)
+    def forward(self, x: torch.tensor) -> torch.tensor :
+        out = torch.matmul(x, self.char_embedding).view(x.shape[0],-1)
         out = self.layer1(out)
         out = self.bn1(out)
         out = self.relu(out)
-        self.activations.append(out.detach().cpu().numpy().flatten())  # Save activations after ReLU
-        self.layer_names.append("Layer1")
-
-        out = self.layer_2(out)
-        out = self.relu(out)
-        # Store activation for layer_2
-        self.activations.append(out.detach().cpu().numpy().flatten())  # Save activations after ReLU
-        self.layer_names.append("Layer_2")
-
+        out = self.layer2(out)
         out = self.bn2(out)
+        out = self.relu(out)
         out = self.out_layer(out)
-        # Store activation for out_layer
-        self.activations.append(out.detach().cpu().numpy().flatten())
-        self.layer_names.append("Out_Layer")
-        
         return out
-
 
 
 chars = sorted(list(set(''.join(names))))
@@ -65,7 +48,7 @@ stoi['<S>'] = 0
 stoi['<E>'] = len(stoi)
 itos = {i:ch for ch,i in stoi.items()}
 
-fitos = lambda itos, x: ''.join([itos[i] for i in x]) 
+fitos = lambda x: ''.join([itos[i] for i in x]) 
 fstoi = lambda s: [stoi[i] for i in s] 
 
 block_size = CONTEXT_LENGTH
@@ -83,29 +66,13 @@ for name in names:
 
 X = torch.tensor(X).to(device)
 Y = torch.tensor(Y).to(device)
+
+# for i,j in zip(X.tolist(),Y.tolist()):
+#     print(fitos(i),"->",itos[j])
 Y_train = Y[:int(0.9*len(Y))].to(device)
 X_train = X[:int(0.9*len(X))].to(device)
 Y_test = Y[int(0.9*len(Y)):].to(device)
 X_test = X[int(0.9*len(X)):].to(device)
-
-
-
-def plot_activation_histograms(model):
-    model = model.to("cpu")
-    model.eval()
-
-    # Visualize activations after each layer
-    for i, (activation, layer_name) in enumerate(zip(model.activations, model.layer_names)):
-        activation_tensor = torch.tensor(activation)  # Convert to tensor if necessary
-        hy, hx = torch.histogram(activation_tensor, bins=100, density=True)  # Using tensor as input
-        plt.plot(hx[:-1], hy, label=f"Activation {i+1}")
-        plt.title(f"Activation distribution at {layer_name}")  # Layer name as title
-        plt.xlabel('Value')
-        plt.ylabel('Density')
-        plt.legend()
-        plt.show()
-
-
 
 def train():
     #TRAIN
@@ -113,6 +80,8 @@ def train():
     optimizer = torch.optim.Adam(model.parameters(), lr =0.01)
     criterion = nn.CrossEntropyLoss()
     losses = []
+    tot_c = 0
+    corr_c = 0 
 
     for _ in range(EPOCHS):
         batch_ix = torch.randint(0,len(X_train),(BATCH_SIZE,))
@@ -124,7 +93,8 @@ def train():
         loss.backward()
         optimizer.step()
         losses.append(loss.item())
-        if(_%1000==0): print(_, loss.item())
+        if(_%1000==0): 
+            print(_, loss.item())
 
     #EVALUATE
     model.eval()
@@ -142,7 +112,6 @@ def train():
         torch.save({'model_state_dict': model.state_dict(),
          'loss': val_loss,
          }, "model.pt")
-        # plot_activation_histograms(model)
 
     # plt.plot(losses)
     # plt.ylabel("LOSS")
@@ -162,38 +131,20 @@ def generate(no_of_names):
         for i in range(no_of_names):
             s = ['<S>']*CONTEXT_LENGTH
             while True:
-                x = torch.tensor(fstoi(s[-1:-CONTEXT_LENGTH-1:-1])).unsqueeze(0)
+                x = torch.tensor(fstoi(s[-CONTEXT_LENGTH:]), dtype=torch.long).unsqueeze(0).to(device)
                 x = nn.functional.one_hot(x, num_classes = VOCAB_SIZE).float()
                 x = x.to(device)
                 out = inference_model.forward(x)
                 # print(out, out.shape)
-                prob = torch.nn.functional.softmax(out,dim=1)
+                temperature = 1
+                prob = torch.nn.functional.softmax(out/temperature ,dim=1)
 
                 iout = torch.multinomial(prob, num_samples = 1, replacement = True)[0].item()
                 s.append(itos[iout])
                 if(s[-1]=="<E>"):
                     break
-            print(''.join(s))
-
-def plot_model_hist():
-    n_model = n_gram_mlp(batch_size = 1, context_length = CONTEXT_LENGTH, embedding_size = EMBEDDING_SIZE, vocab_size = VOCAB_SIZE)
-    n_model.load_state_dict(torch.load('model.pt')['model_state_dict'])
-    n_model = n_model.to("cpu")
-    n_model.eval()
-    with torch.no_grad():
-        for name,layer in n_model.named_parameters():
-            # print(name)
-            # print(layer)
-            hy,hx = torch.histogram(layer, density = True)
-            plt.plot(hx[:-1], hy)
-            plt.title(f"Layer: {name} distribution")
-            plt.show()
-
-
-
-
+            print(''.join(s[CONTEXT_LENGTH:-1]))
 
 train()
-# plot_model_hist()
 generate(no_of_names = 50)
 
